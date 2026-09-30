@@ -95,9 +95,16 @@
   .progress-bar { height:6px; background: var(--border); border-radius:3px; overflow:hidden; margin:12px 0; display:none; }
   .progress-fill { height:100%; background: var(--accent); width:0%; transition: width 0.2s; }
 
-  .yt-preview { display:flex; gap:12px; align-items:center; background: var(--card); border:1px solid var(--border); border-radius:12px; padding:12px; margin-bottom:12px; }
+  .yt-preview { display:flex; gap:12px; align-items:center; background: var(--card); border:1px solid var(--border); border-radius:12px; padding:12px; margin-top:12px; }
   .yt-preview img { width:80px; border-radius:8px; }
   .yt-preview .title { font-size:14px; font-weight:600; }
+
+  /* Capture status line under the YouTube / URL buttons */
+  .capture-status { font-size:13px; color: var(--muted); margin:12px 0 0; min-height:0; line-height:1.4; }
+  .capture-status.ok { color: var(--success); }
+  .capture-status.err { color: var(--danger); }
+  details.manual { margin-top:16px; }
+  details.manual summary { cursor:pointer; color: var(--muted); font-size:13px; margin-bottom:12px; }
 
   label.small { display:block; font-size:13px; color: var(--muted); margin-bottom:6px; }
   .toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background: var(--success); color:#fff; padding:10px 20px; border-radius:10px; font-size:14px; display:none; z-index:100; }
@@ -152,19 +159,14 @@
       </div>
     </div>
 
-    <!-- YOUTUBE TAB -->
+    <!-- YOUTUBE TAB — now automatic: the capture-youtube edge function fetches the transcript -->
     <div class="tab-panel" id="panel-youtube">
       <div class="card">
         <label class="small">YouTube URL</label>
         <input type="text" id="yt-url" placeholder="https://www.youtube.com/watch?v=...">
-        <button class="btn btn-secondary" id="yt-fetch">Look Up Video</button>
+        <button class="btn" id="yt-capture">Capture Video</button>
+        <p class="capture-status" id="yt-status"></p>
         <div id="yt-preview-wrap"></div>
-        <div id="yt-transcript-wrap" style="display:none; margin-top:12px;">
-          <label class="small">Paste the transcript below (click "Get Transcript" to open the video, then copy its transcript from YouTube's panel and paste it here)</label>
-          <a href="#" target="_blank" id="yt-transcript-link" class="btn btn-secondary" style="display:block; text-align:center; text-decoration:none; margin-bottom:12px;">Get Transcript ↗</a>
-          <textarea id="yt-transcript" placeholder="Paste transcript here..."></textarea>
-          <button class="btn" id="yt-save">Save Thought</button>
-        </div>
       </div>
     </div>
 
@@ -184,14 +186,20 @@
       </div>
     </div>
 
-    <!-- URL TAB -->
+    <!-- URL TAB — now automatic: the capture-url edge function fetches the page -->
     <div class="tab-panel" id="panel-url">
       <div class="card">
         <label class="small">Article URL</label>
         <input type="text" id="url-address" placeholder="https://example.com/article">
-        <p class="hint" style="margin:0 0 12px;">Because of browser security rules, your app can't fetch the article text automatically. Copy the article's text yourself and paste it below.</p>
-        <textarea id="url-content" placeholder="Paste article text here..."></textarea>
-        <button class="btn" id="url-save">Save Thought</button>
+        <button class="btn" id="url-capture">Capture Article</button>
+        <p class="capture-status" id="url-status"></p>
+
+        <!-- Backup for pages a server can't read (logins, pages built with JavaScript) -->
+        <details class="manual">
+          <summary>Page won't capture? Paste the text by hand instead</summary>
+          <textarea id="url-content" placeholder="Paste article text here..."></textarea>
+          <button class="btn btn-secondary" id="url-save">Save Pasted Text</button>
+        </details>
       </div>
     </div>
 
@@ -239,6 +247,13 @@
     return out;
   }
 
+  // Make text safe to drop into the page (titles come from other websites)
+  function escapeHtml(text) {
+    return String(text || '')
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
   // ---------- Supabase ----------
   const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
   let currentUser = null;
@@ -248,6 +263,28 @@
     t.textContent = msg;
     t.style.display = 'block';
     setTimeout(() => { t.style.display = 'none'; }, 2200);
+  }
+
+  // Call one of your edge functions. supabase-js automatically attaches your
+  // login token, which is how the function knows whose brain to save into.
+  async function callFunction(name, body) {
+    const { data, error } = await sb.functions.invoke(name, { body });
+    if (error) {
+      let msg = error.message;
+      try {
+        const detail = await error.context.json();
+        if (detail && detail.error) msg = detail.error;
+      } catch (_) { /* keep the generic message */ }
+      throw new Error(msg);
+    }
+    if (data && data.ok === false) throw new Error(data.error || 'Something went wrong');
+    return data;
+  }
+
+  function setStatus(el, text, kind) {
+    el.textContent = text;
+    el.classList.remove('ok', 'err');
+    if (kind) el.classList.add(kind);
   }
 
   async function checkConnection() {
@@ -392,68 +429,45 @@
     }
   });
 
-  // ---------- YouTube ----------
+  // ---------- YouTube (automatic, via the capture-youtube edge function) ----------
   function extractYouTubeId(url) {
-    const m = url.match(/(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
+    const m = url.match(/(?:youtube\.com\/(?:watch\?(?:.*&)?v=|embed\/|shorts\/|live\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
     return m ? m[1] : null;
   }
 
-  let currentYtVideoId = null;
-  let currentYtTitle = '';
-
-  document.getElementById('yt-fetch').addEventListener('click', async () => {
-    const url = document.getElementById('yt-url').value.trim();
-    const videoId = extractYouTubeId(url);
+  document.getElementById('yt-capture').addEventListener('click', async () => {
+    const input = document.getElementById('yt-url');
+    const btn = document.getElementById('yt-capture');
+    const status = document.getElementById('yt-status');
     const wrap = document.getElementById('yt-preview-wrap');
-    if (!videoId) {
-      wrap.innerHTML = '<p class="hint">Could not find a video ID in that URL.</p>';
-      return;
-    }
-    try {
-      const res = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`);
-      if (!res.ok) throw new Error('Video not found');
-      const data = await res.json();
-      currentYtVideoId = videoId;
-      currentYtTitle = decodeEntities(data.title);
-      wrap.innerHTML = `<div class="yt-preview"><img src="${data.thumbnail_url}"><div class="title">${currentYtTitle}</div></div>`;
-      document.getElementById('yt-transcript-link').href = `https://www.youtube.com/watch?v=${videoId}`;
-      document.getElementById('yt-transcript-wrap').style.display = 'block';
-    } catch (e) {
-      wrap.innerHTML = '<p class="hint">Could not look up that video: ' + e.message + '</p>';
-    }
-  });
+    const url = input.value.trim();
 
-  document.getElementById('yt-save').addEventListener('click', async () => {
-    const transcript = document.getElementById('yt-transcript').value.trim();
-    if (!transcript || !currentYtVideoId) { showToast('Paste a transcript first'); return; }
-    const cleanTranscript = decodeEntities(transcript);
+    if (!url) { setStatus(status, 'Paste a YouTube link first.', 'err'); return; }
+    const videoId = extractYouTubeId(url);
+
+    btn.disabled = true;
+    btn.textContent = 'Capturing…';
+    setStatus(status, 'Your server is fetching the transcript. This can take up to 30 seconds.');
+    wrap.innerHTML = videoId
+      ? `<div class="yt-preview"><img src="https://i.ytimg.com/vi/${videoId}/mqdefault.jpg" alt=""><div class="title">Looking up video…</div></div>`
+      : '';
+
     try {
-      const { data: thought, error } = await sb.from('thoughts').insert({
-        content: `📹 YouTube: ${currentYtTitle}\n\n${cleanTranscript}`,
-        user_id: currentUser.id,
-        metadata: { video_id: currentYtVideoId }
-      }).select().single();
-      if (error) throw error;
-      try {
-        await sb.from('thought_sources').insert({
-          thought_id: thought.id,
-          user_id: currentUser.id,
-          source_text: cleanTranscript,
-          source_kind: 'youtube_transcript',
-          char_count: cleanTranscript.length,
-          truncated: false
-        });
-      } catch (srcErr) {
-        console.warn('thought_sources insert failed (non-fatal):', srcErr);
+      const r = await callFunction('capture-youtube', { url });
+      const thumb = r && videoId ? `<img src="https://i.ytimg.com/vi/${videoId}/mqdefault.jpg" alt="">` : '';
+      wrap.innerHTML = `<div class="yt-preview">${thumb}<div class="title">${escapeHtml(decodeEntities(r.title))}</div></div>`;
+      if (r.has_transcript) {
+        setStatus(status, `Saved the full transcript (${Number(r.chars).toLocaleString()} characters, via ${r.fetched_via}).`, 'ok');
+      } else {
+        setStatus(status, 'Saved, but no transcript was available, so this is the video description instead.', 'ok');
       }
-      document.getElementById('yt-transcript').value = '';
-      document.getElementById('yt-url').value = '';
-      document.getElementById('yt-preview-wrap').innerHTML = '';
-      document.getElementById('yt-transcript-wrap').style.display = 'none';
-      currentYtVideoId = null;
+      input.value = '';
       showToast('Saved!');
     } catch (e) {
-      showToast('Save failed: ' + e.message);
+      setStatus(status, 'Could not capture: ' + e.message, 'err');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Capture Video';
     }
   });
 
@@ -524,7 +538,33 @@
     }
   });
 
-  // ---------- URL ----------
+  // ---------- URL (automatic, via the capture-url edge function) ----------
+  document.getElementById('url-capture').addEventListener('click', async () => {
+    const input = document.getElementById('url-address');
+    const btn = document.getElementById('url-capture');
+    const status = document.getElementById('url-status');
+    const url = input.value.trim();
+
+    if (!url) { setStatus(status, 'Paste a link first.', 'err'); return; }
+
+    btn.disabled = true;
+    btn.textContent = 'Capturing…';
+    setStatus(status, 'Your server is fetching the page…');
+
+    try {
+      const r = await callFunction('capture-url', { url });
+      setStatus(status, `Saved "${decodeEntities(r.title)}" from ${r.hostname} (${Number(r.chars).toLocaleString()} characters).`, 'ok');
+      input.value = '';
+      showToast('Saved!');
+    } catch (e) {
+      setStatus(status, 'Could not capture: ' + e.message, 'err');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Capture Article';
+    }
+  });
+
+  // Manual backup: paste the text yourself (same as Level 2)
   document.getElementById('url-save').addEventListener('click', async () => {
     const url = document.getElementById('url-address').value.trim();
     const content = document.getElementById('url-content').value.trim();
