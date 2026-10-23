@@ -24,7 +24,8 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY") ?? "";
 // Your own account id (the secret you added in Level 3). Thoughts saved
-// through Claude get stamped with it so they show up in your app.
+// through Claude get stamped with it so they show up in your app, and
+// (Level 7) search uses it to know whose thoughts to look through.
 const OWNER_USER_ID = Deno.env.get("OWNER_USER_ID") ?? null;
 
 // The database connection. It lives only here, on the server.
@@ -53,7 +54,7 @@ const TOOLS = [
   {
     name: "search_thoughts",
     description:
-      "Search the user's personal Open Brain (their saved notes, YouTube transcripts, PDFs, articles, and Telegram messages) by MEANING, not just exact words. Describe what you're looking for in natural language, e.g. 'how to get new clients' finds notes about customer acquisition even if they never use those words. Returns up to 10 matches, most similar first, each with a similarity score from 0 to 1, plus 'connected_thoughts': other thoughts automatically linked to that result by meaning. Mention relevant connected thoughts to the user too.",
+      "Search the user's personal Open Brain (their saved notes, YouTube transcripts, PDFs, articles, and Telegram messages). Finds matches by MEANING and by EXACT WORDS at the same time, so both 'how to get new clients' (finds notes about customer acquisition even if they never use those words) and exact terms like a name or number work. Also searches inside long captures paragraph by paragraph: when a result has 'why_it_matched', that is the specific passage from a long transcript or article that answered the search, so use it. Returns up to 10 matches, best first, each with 'connected_thoughts': other thoughts automatically linked to that result by meaning. Mention relevant connected thoughts to the user too.",
     inputSchema: {
       type: "object",
       properties: {
@@ -128,95 +129,132 @@ function toolText(text: string, isError = false) {
 // ---------------------------------------------------------------------
 async function callTool(name: string, args: Record<string, unknown>) {
   switch (name) {
-    // --- Search: find thoughts whose content contains the query ---
+    // --- Search: hybrid search (meaning + exact keywords), with chunks ---
     case "search_thoughts": {
       const query = String(args?.query ?? "").trim();
       if (!query) return toolText("Please provide a search query.", true);
 
-      // Level 6: semantic search. Turn the question into its own "meaning
-      // coordinates", then ask the database for the thoughts closest to it.
-      const embRes = await fetch(`${SUPABASE_URL}/functions/v1/generate-embedding`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${SERVICE_ROLE_KEY}`,
-        },
-        body: JSON.stringify({ text: query }),
-      }).catch(() => null);
-      const emb = embRes ? await embRes.json().catch(() => ({})) : {};
-
-      if (emb?.embedding) {
-        const { data, error } = await supabase.rpc("search_thoughts", {
-          query_embedding: emb.embedding,
-          match_threshold: 0.3,
-          match_count: 10,
-        });
-        if (!error) {
-          if (!data || data.length === 0) {
-            return toolText(`No thoughts found related to "${query}".`);
-          }
-          // The graph: for each result, also show the thoughts it is wired to
-          // in thought_links (in either direction), so related ideas surface
-          // even when they didn't match the search themselves.
-          const ids = data.map((t: { id: string }) => t.id);
-          const { data: links } = await supabase
-            .from("thought_links")
-            .select("source_thought_id, target_thought_id, similarity_score")
-            .or(`source_thought_id.in.(${ids.join(",")}),target_thought_id.in.(${ids.join(",")})`);
-
-          const neighbourIds = new Set<string>();
-          for (const l of links ?? []) {
-            neighbourIds.add(l.source_thought_id);
-            neighbourIds.add(l.target_thought_id);
-          }
-          const { data: neighbours } = neighbourIds.size
-            ? await supabase.from("thoughts").select("id, content").in("id", [...neighbourIds])
-            : { data: [] };
-          const preview = new Map(
-            (neighbours ?? []).map((n: { id: string; content: string }) => [
-              n.id,
-              n.content.length > 200 ? n.content.slice(0, 200) + "…" : n.content,
-            ]),
-          );
-
-          const results = data.map((t: { id: string; similarity: number }) => ({
-            ...t,
-            similarity: Math.round(t.similarity * 100) / 100,
-            connected_thoughts: (links ?? [])
-              .filter((l) => l.source_thought_id === t.id || l.target_thought_id === t.id)
-              .map((l) => {
-                const otherId = l.source_thought_id === t.id ? l.target_thought_id : l.source_thought_id;
-                return {
-                  id: otherId,
-                  link_strength: Math.round(l.similarity_score * 100) / 100,
-                  content: preview.get(otherId) ?? "",
-                };
-              })
-              .sort((a, b) => b.link_strength - a.link_strength),
-          }));
-          return toolText(JSON.stringify(results, null, 2));
-        }
-        console.log("search_thoughts RPC failed, falling back to keyword search:", error.message);
+      // Level 7: search_thoughts must be told WHOSE thoughts to search.
+      // This server uses the service role key (no real sign-in), so
+      // row-level security cannot narrow it down for us. OWNER_USER_ID is
+      // your own account id, the same secret the Telegram bot uses.
+      if (!OWNER_USER_ID) {
+        return toolText("The OWNER_USER_ID secret is not set, so I can't tell whose thoughts to search.", true);
       }
 
-      // Fallback: the old keyword search, used only if the embedding or the
-      // RPC failed, so search never goes completely dark.
+      // Turn the question into its "meaning coordinates". If this fails for
+      // any reason we still search: a null embedding means keyword-only.
+      let queryEmbedding: number[] | null = null;
+      try {
+        const embRes = await fetch(`${SUPABASE_URL}/functions/v1/generate-embedding`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${SERVICE_ROLE_KEY}`,
+          },
+          body: JSON.stringify({ text: query }),
+        });
+        const emb = await embRes.json().catch(() => ({}));
+        if (Array.isArray(emb?.embedding)) queryEmbedding = emb.embedding;
+      } catch { /* keyword-only search is fine */ }
+
+      const { data, error } = await supabase.rpc("search_thoughts", {
+        query_text: query,
+        p_user_id: OWNER_USER_ID,
+        query_embedding: queryEmbedding,
+        match_threshold: 0.3,
+        match_count: 10,
+      });
+
+      if (!error) {
+        if (!data || data.length === 0) {
+          return toolText(`No thoughts found related to "${query}".`);
+        }
+
+        type Hit = {
+          id: string;
+          content: string;
+          created_at: string;
+          similarity: number;
+          matched_chunk: string | null;
+          match_source: string;
+        };
+        const hits = data as Hit[];
+
+        // The graph: for each result, also show the thoughts it is wired to
+        // in thought_links (in either direction).
+        const ids = hits.map((t) => t.id);
+        const { data: links } = await supabase
+          .from("thought_links")
+          .select("source_thought_id, target_thought_id, similarity_score")
+          .or(`source_thought_id.in.(${ids.join(",")}),target_thought_id.in.(${ids.join(",")})`);
+
+        const neighbourIds = new Set<string>();
+        for (const l of links ?? []) {
+          neighbourIds.add(l.source_thought_id);
+          neighbourIds.add(l.target_thought_id);
+        }
+        const { data: neighbours } = neighbourIds.size
+          ? await supabase.from("thoughts").select("id, content").in("id", [...neighbourIds])
+          : { data: [] };
+        const preview = new Map(
+          (neighbours ?? []).map((n: { id: string; content: string }) => [
+            n.id,
+            n.content.length > 200 ? n.content.slice(0, 200) + "…" : n.content,
+          ]),
+        );
+
+        const results = hits.map((t) => ({
+          id: t.id,
+          created_at: t.created_at,
+          // similarity is 0 when a result was found by keyword only
+          similarity: Math.round((t.similarity ?? 0) * 100) / 100,
+          matched_by: t.match_source, // "thought" (whole note) or "chunk" (one passage)
+          // When the match came from inside a long capture, this is the
+          // passage that actually matched: the real answer.
+          why_it_matched: t.matched_chunk
+            ? `(from partway through a longer capture) ${t.matched_chunk}`
+            : undefined,
+          // Long captures get a short preview instead of the full transcript.
+          content: t.matched_chunk && t.content.length > 400
+            ? t.content.slice(0, 400) + "… [long capture; see why_it_matched for the relevant part]"
+            : t.content,
+          connected_thoughts: (links ?? [])
+            .filter((l) => l.source_thought_id === t.id || l.target_thought_id === t.id)
+            .map((l) => {
+              const otherId = l.source_thought_id === t.id ? l.target_thought_id : l.source_thought_id;
+              return {
+                id: otherId,
+                link_strength: Math.round(l.similarity_score * 100) / 100,
+                content: preview.get(otherId) ?? "",
+              };
+            })
+            .sort((a, b) => b.link_strength - a.link_strength),
+        }));
+        return toolText(JSON.stringify(results, null, 2));
+      }
+      console.log("search_thoughts RPC failed, falling back to plain keyword search:", error.message);
+
+      // Last-resort fallback: a plain "contains" search, only if the RPC
+      // itself failed, so search never goes completely dark. Filtered to
+      // your own thoughts, for the same reason as p_user_id above.
       // % and _ are wildcards in database searches; escape them so a
       // search for "50%" means the literal text "50%".
       const escaped = query.replace(/[\\%_]/g, (c) => "\\" + c);
 
-      const { data, error } = await supabase
+      const { data: fallback, error: fbError } = await supabase
         .from("thoughts")
         .select("id, content, created_at")
+        .eq("user_id", OWNER_USER_ID)
         .ilike("content", `%${escaped}%`) // ilike = case-insensitive "contains"
         .order("created_at", { ascending: false })
         .limit(10);
 
-      if (error) return toolText(`Database error: ${error.message}`, true);
-      if (!data || data.length === 0) {
+      if (fbError) return toolText(`Database error: ${fbError.message}`, true);
+      if (!fallback || fallback.length === 0) {
         return toolText(`No thoughts found containing "${query}". Try a different or shorter keyword.`);
       }
-      return toolText(JSON.stringify(data, null, 2));
+      return toolText(JSON.stringify(fallback, null, 2));
     }
 
     // --- List recent: the newest thoughts ---

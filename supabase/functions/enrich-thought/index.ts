@@ -6,6 +6,7 @@
 // coordinates") and saves that onto the row too.
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import { saveThoughtChunksSafe } from "../_shared/thought-chunks.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -153,6 +154,11 @@ Deno.serve(async (req) => {
     // a place on the map and wires to their neighbours.
     const embedding = await embedThought(supabase, record.id, content);
     if (embedding) await linkThought(supabase, record.id, embedding, userId);
+
+        // Level 7: cut long captures into overlapping chunks, each with its own
+    // embedding. Never throws, and does nothing for anything under ~2,000
+    // characters, so it is safe to run on every thought.
+    await saveThoughtChunksSafe(supabase, record.id, content, "enrich-thought", "summary");
 
     if (record.category) return ok(`Thought ${record.id} already has a category — skipping enrichment`);
     if (content.length < 20) return ok(`Thought ${record.id} too short to enrich — skipping`);

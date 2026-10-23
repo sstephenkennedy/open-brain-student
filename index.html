@@ -111,6 +111,10 @@
   .search-row { display:flex; gap:8px; margin-bottom:16px; }
   .search-row input { margin-bottom:0; }
   .search-row button { flex-shrink:0; padding:0 16px; border-radius:10px; border:1px solid var(--border); background:var(--card); color:var(--text); cursor:pointer; }
+
+  /* Level 7: the passage inside a long capture that actually matched */
+  .matched-chunk { white-space:pre-wrap; font-size:15px; line-height:1.5; border-left:3px solid var(--accent); background: rgba(99,102,241,0.08); padding:10px 12px; border-radius:6px; margin-bottom:12px; }
+  .matched-label { font-size:12px; color: var(--muted); margin-bottom:6px; }
 </style>
 </head>
 <body>
@@ -598,6 +602,7 @@
   });
 
   // ---------- Search ----------
+  // Used by the Recent tab: plain cards with each thought's full content.
   function renderCards(container, rows) {
     if (!rows || rows.length === 0) {
       container.innerHTML = '<p class="hint">Nothing here yet.</p>';
@@ -611,21 +616,50 @@
     `).join('');
   }
 
-  document.getElementById('search-btn').addEventListener('click', async () => {
+  // Level 7: search now goes through the search-brain edge function, which
+  // runs the same hybrid search (meaning + exact words + chunks inside long
+  // captures) that Claude Desktop uses. The browser can't do this itself,
+  // because making an embedding needs a key that must never be in a web page.
+  function renderSearchResults(container, rows) {
+    if (!rows || rows.length === 0) {
+      container.innerHTML = '<p class="hint">No matches found.</p>';
+      return;
+    }
+    container.innerHTML = rows.map(row => {
+      const content = row.content || '';
+      const fromChunk = !!row.matched_chunk;
+      // For long captures, show the passage that matched first, then a short
+      // preview of the document it came from instead of the whole transcript.
+      const chunkHtml = fromChunk
+        ? `<div class="matched-chunk"><div class="matched-label">(from partway through a longer capture)</div>${escapeHtml(row.matched_chunk)}</div>`
+        : '';
+      const shown = fromChunk && content.length > 400 ? content.slice(0, 400) + '…' : content;
+      return `
+        <div class="card">
+          ${chunkHtml}
+          <div class="content">${escapeHtml(shown)}</div>
+          <div class="meta">${new Date(row.created_at).toLocaleString()}</div>
+        </div>`;
+    }).join('');
+  }
+
+  async function runSearch() {
     const q = document.getElementById('search-input').value.trim();
     const container = document.getElementById('search-results');
     if (!q) { container.innerHTML = ''; return; }
+    container.innerHTML = '<p class="hint">Searching…</p>';
     try {
-      const { data, error } = await sb.from('thoughts')
-        .select('*')
-        .ilike('content', `%${q}%`)
-        .order('created_at', { ascending: false })
-        .limit(50);
-      if (error) throw error;
-      renderCards(container, data);
+      const r = await callFunction('search-brain', { query: q, limit: 20 });
+      renderSearchResults(container, r.results);
     } catch (e) {
-      container.innerHTML = '<p class="hint">Search failed: ' + e.message + '</p>';
+      container.innerHTML = '<p class="hint">Search failed: ' + escapeHtml(e.message) + '</p>';
     }
+  }
+
+  document.getElementById('search-btn').addEventListener('click', runSearch);
+  // Bonus: pressing Enter in the search box searches too.
+  document.getElementById('search-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') runSearch();
   });
 
   document.getElementById('search-clear').addEventListener('click', () => {
