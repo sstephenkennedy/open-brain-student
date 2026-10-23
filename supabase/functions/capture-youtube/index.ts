@@ -280,7 +280,7 @@ Deno.serve(async (req) => {
 
     const { data: thought, error: insertError } = await admin
       .from('thoughts')
-      .insert({
+      .upsert({
         user_id: user.id,
         content,
         source: 'youtube',
@@ -291,7 +291,7 @@ Deno.serve(async (req) => {
           has_transcript: result.hasTranscript,
           fetched_via: result.source,
         },
-      })
+      }, { onConflict: 'dedup_key,user_id', ignoreDuplicates: false })
       .select('id')
       .single()
 

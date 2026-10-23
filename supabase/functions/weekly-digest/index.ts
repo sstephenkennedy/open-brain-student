@@ -111,7 +111,7 @@ Deno.serve(async () => {
     // 5. Save the digest back into the brain
     const content = `🧠 Weekly Digest — ${fmtDate(start)} to ${fmtDate(end)}\n\n${String(llm.text).trim()}`;
 
-    const { error: insertError } = await supabase.from("thoughts").insert({
+        const { error: insertError } = await supabase.from("thoughts").upsert({
       content,
       category: "digest",
       tags: ["weekly-digest"],
@@ -124,7 +124,7 @@ Deno.serve(async () => {
         period_start: start.toISOString(),
         period_end: end.toISOString(),
       },
-    });
+    }, { onConflict: "dedup_key,user_id", ignoreDuplicates: false });
 
     if (insertError) {
       console.error("Could not save digest:", insertError.message);

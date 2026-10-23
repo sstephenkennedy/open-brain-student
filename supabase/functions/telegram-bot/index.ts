@@ -164,7 +164,7 @@ Deno.serve(async (req) => {
     }
 
     // ── Everything else: save it as a new thought ───────────────────
-    const { error } = await supabase.from('thoughts').insert({
+        const { error } = await supabase.from('thoughts').upsert({
       user_id: OWNER_USER_ID, // without this, the row is invisible to your app
       content: text,
       source: 'telegram',
@@ -172,7 +172,7 @@ Deno.serve(async (req) => {
         telegram_chat_id: chatId,
         telegram_message_id: message.message_id,
       },
-    })
+    }, { onConflict: 'dedup_key,user_id', ignoreDuplicates: false })
 
     if (error) throw error
     await reply(chatId, 'Saved to your brain ✅')

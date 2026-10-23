@@ -415,11 +415,11 @@
     const text = document.getElementById('voice-transcript').value.trim();
     if (!text) { showToast('Nothing to save yet'); return; }
     try {
-      const { error } = await sb.from('thoughts').insert({
+      const { error } = await sb.from('thoughts').upsert({
         content: decodeEntities(text),
         user_id: currentUser.id,
         metadata: {}
-      });
+      }, { onConflict: 'dedup_key,user_id', ignoreDuplicates: false });
       if (error) throw error;
       document.getElementById('voice-transcript').value = '';
       baseTranscript = '';
@@ -523,11 +523,11 @@
     const text = document.getElementById('pdf-text').value.trim();
     if (!text) { showToast('Nothing to save'); return; }
     try {
-      const { error } = await sb.from('thoughts').insert({
+      const { error } = await sb.from('thoughts').upsert({
         content: `📄 PDF: ${currentPdfName}\n\n${text}`,
         user_id: currentUser.id,
         metadata: {}
-      });
+      }, { onConflict: 'dedup_key,user_id', ignoreDuplicates: false });
       if (error) throw error;
       document.getElementById('pdf-text').value = '';
       document.getElementById('pdf-review-wrap').style.display = 'none';
@@ -571,11 +571,11 @@
     if (!url || !content) { showToast('Fill in both the URL and the article text'); return; }
     const cleanContent = decodeEntities(content);
     try {
-      const { data: thought, error } = await sb.from('thoughts').insert({
+      const { data: thought, error } = await sb.from('thoughts').upsert({
         content: `🔗 ${url}\n\n${cleanContent}`,
         user_id: currentUser.id,
         metadata: { url }
-      }).select().single();
+      }, { onConflict: 'dedup_key,user_id', ignoreDuplicates: false }).select().single();
       if (error) throw error;
       try {
         await sb.from('thought_sources').insert({

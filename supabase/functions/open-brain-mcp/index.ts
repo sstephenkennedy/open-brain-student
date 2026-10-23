@@ -23,6 +23,9 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY") ?? "";
+// Your own account id (the secret you added in Level 3). Thoughts saved
+// through Claude get stamped with it so they show up in your app.
+const OWNER_USER_ID = Deno.env.get("OWNER_USER_ID") ?? null;
 
 // The database connection. It lives only here, on the server.
 const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
@@ -50,13 +53,13 @@ const TOOLS = [
   {
     name: "search_thoughts",
     description:
-      "Search the user's personal Open Brain (their saved notes, YouTube transcripts, PDFs, articles, and Telegram messages) for thoughts containing a word or phrase. Works best with a single keyword or short phrase; try several different keywords if the first search finds nothing. Returns up to 10 matches, newest first.",
+      "Search the user's personal Open Brain (their saved notes, YouTube transcripts, PDFs, articles, and Telegram messages) by MEANING, not just exact words. Describe what you're looking for in natural language, e.g. 'how to get new clients' finds notes about customer acquisition even if they never use those words. Returns up to 10 matches, most similar first, each with a similarity score from 0 to 1, plus 'connected_thoughts': other thoughts automatically linked to that result by meaning. Mention relevant connected thoughts to the user too.",
     inputSchema: {
       type: "object",
       properties: {
         query: {
           type: "string",
-          description: "A keyword or short phrase to look for, e.g. 'marketing' or 'Tacoma'.",
+          description: "What to look for, in plain words, e.g. 'ideas for my landscaping business' or 'Tacoma'.",
         },
       },
       required: ["query"],
@@ -130,6 +133,74 @@ async function callTool(name: string, args: Record<string, unknown>) {
       const query = String(args?.query ?? "").trim();
       if (!query) return toolText("Please provide a search query.", true);
 
+      // Level 6: semantic search. Turn the question into its own "meaning
+      // coordinates", then ask the database for the thoughts closest to it.
+      const embRes = await fetch(`${SUPABASE_URL}/functions/v1/generate-embedding`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${SERVICE_ROLE_KEY}`,
+        },
+        body: JSON.stringify({ text: query }),
+      }).catch(() => null);
+      const emb = embRes ? await embRes.json().catch(() => ({})) : {};
+
+      if (emb?.embedding) {
+        const { data, error } = await supabase.rpc("search_thoughts", {
+          query_embedding: emb.embedding,
+          match_threshold: 0.3,
+          match_count: 10,
+        });
+        if (!error) {
+          if (!data || data.length === 0) {
+            return toolText(`No thoughts found related to "${query}".`);
+          }
+          // The graph: for each result, also show the thoughts it is wired to
+          // in thought_links (in either direction), so related ideas surface
+          // even when they didn't match the search themselves.
+          const ids = data.map((t: { id: string }) => t.id);
+          const { data: links } = await supabase
+            .from("thought_links")
+            .select("source_thought_id, target_thought_id, similarity_score")
+            .or(`source_thought_id.in.(${ids.join(",")}),target_thought_id.in.(${ids.join(",")})`);
+
+          const neighbourIds = new Set<string>();
+          for (const l of links ?? []) {
+            neighbourIds.add(l.source_thought_id);
+            neighbourIds.add(l.target_thought_id);
+          }
+          const { data: neighbours } = neighbourIds.size
+            ? await supabase.from("thoughts").select("id, content").in("id", [...neighbourIds])
+            : { data: [] };
+          const preview = new Map(
+            (neighbours ?? []).map((n: { id: string; content: string }) => [
+              n.id,
+              n.content.length > 200 ? n.content.slice(0, 200) + "…" : n.content,
+            ]),
+          );
+
+          const results = data.map((t: { id: string; similarity: number }) => ({
+            ...t,
+            similarity: Math.round(t.similarity * 100) / 100,
+            connected_thoughts: (links ?? [])
+              .filter((l) => l.source_thought_id === t.id || l.target_thought_id === t.id)
+              .map((l) => {
+                const otherId = l.source_thought_id === t.id ? l.target_thought_id : l.source_thought_id;
+                return {
+                  id: otherId,
+                  link_strength: Math.round(l.similarity_score * 100) / 100,
+                  content: preview.get(otherId) ?? "",
+                };
+              })
+              .sort((a, b) => b.link_strength - a.link_strength),
+          }));
+          return toolText(JSON.stringify(results, null, 2));
+        }
+        console.log("search_thoughts RPC failed, falling back to keyword search:", error.message);
+      }
+
+      // Fallback: the old keyword search, used only if the embedding or the
+      // RPC failed, so search never goes completely dark.
       // % and _ are wildcards in database searches; escape them so a
       // search for "50%" means the literal text "50%".
       const escaped = query.replace(/[\\%_]/g, (c) => "\\" + c);
@@ -172,7 +243,7 @@ async function callTool(name: string, args: Record<string, unknown>) {
 
       const { data, error } = await supabase
         .from("thoughts")
-        .insert({ content })
+        .upsert({ content, user_id: OWNER_USER_ID }, { onConflict: "dedup_key,user_id", ignoreDuplicates: false })
         .select("id, content, created_at")
         .single();
 
