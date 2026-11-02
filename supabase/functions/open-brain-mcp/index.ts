@@ -1,10 +1,10 @@
 // =====================================================================
 // open-brain-mcp — the MCP server for your Open Brain
 // ---------------------------------------------------------------------
-// This is the "librarian." AI assistants (like Claude Desktop) send it
-// requests, it checks the password, goes to your Supabase database,
-// and sends the results back. The AI never touches your database
-// directly.
+// This is the "librarian." AI assistants (like Claude Desktop and the
+// Claude phone app) send it requests, it checks the password, goes to
+// your Supabase database, and sends the results back. The AI never
+// touches your database directly.
 //
 // MCP messages use a format called JSON-RPC 2.0. Every request looks
 // like: { "jsonrpc": "2.0", "id": 1, "method": "...", "params": {...} }
@@ -18,7 +18,7 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 // 1. SETTINGS
 // Supabase gives every edge function SUPABASE_URL and
 // SUPABASE_SERVICE_ROLE_KEY automatically. MCP_ACCESS_KEY is the
-// password you created in Step 2.
+// password you created in Level 4.
 // ---------------------------------------------------------------------
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -34,13 +34,13 @@ const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
 // ---------------------------------------------------------------------
 // 2. CORS HEADERS
 // These tell web browsers this server is allowed to answer requests
-// from other places. Claude Desktop doesn't strictly need them, but
-// they keep the server friendly to browser-based MCP tools too.
+// from other places. Claude doesn't strictly need them, but they keep
+// the server friendly to browser-based MCP tools too.
 // ---------------------------------------------------------------------
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
-    "authorization, content-type, accept, mcp-session-id, mcp-protocol-version",
+    "authorization, content-type, accept, mcp-session-id, mcp-protocol-version, x-mcp-key",
   "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
 };
 
@@ -120,6 +120,20 @@ function rpcError(id: unknown, code: number, message: string): Response {
 // Wrap text the way MCP expects tool results to look
 function toolText(text: string, isError = false) {
   return { content: [{ type: "text", text }], isError };
+}
+
+// The password check. The key can arrive any one of three ways, so
+// different apps can each use whichever they support:
+//   - Authorization: Bearer <key>   (Claude Desktop's config file)
+//   - x-mcp-key: <key>              (apps that allow a custom header)
+//   - ...open-brain-mcp?key=<key>   (apps that only take a URL, like a
+//                                    claude.ai custom connector)
+function hasValidKey(req: Request): boolean {
+  if (!MCP_ACCESS_KEY) return false;
+  const auth = (req.headers.get("Authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
+  const header = (req.headers.get("x-mcp-key") ?? "").trim();
+  const fromUrl = (new URL(req.url).searchParams.get("key") ?? "").trim();
+  return auth === MCP_ACCESS_KEY || header === MCP_ACCESS_KEY || fromUrl === MCP_ACCESS_KEY;
 }
 
 // ---------------------------------------------------------------------
@@ -298,29 +312,30 @@ async function callTool(name: string, args: Record<string, unknown>) {
 // 6. THE FRONT DESK
 // Every request arrives here. In order, we:
 //   a) answer browser "pre-flight" checks (OPTIONS)
-//   b) check the password
-//   c) read the JSON-RPC message
-//   d) route it to the right handler
+//   b) politely refuse anything that isn't POST (no live streaming here)
+//   c) check the password
+//   d) read the JSON-RPC message
+//   e) route it to the right handler
 // ---------------------------------------------------------------------
 Deno.serve(async (req: Request) => {
-  // a) Browser pre-flight check: just say "ok"
+    // a) Browser pre-flight check: just say "ok"
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
 
-  // b) Password check. The request must include:
-  //    Authorization: Bearer <your MCP_ACCESS_KEY>
-  const auth = req.headers.get("Authorization") ?? "";
-  if (!MCP_ACCESS_KEY || auth !== `Bearer ${MCP_ACCESS_KEY}`) {
-    return json({ error: "Unauthorized" }, 401);
-  }
-
-  // This simple server only answers POST requests (no live streaming)
+  // b) This simple server only answers POST requests. Some apps check
+  //    for a live-streaming channel with GET first; a 405 tells them
+  //    "not here, just use POST", which is a normal, expected answer.
   if (req.method !== "POST") {
     return json({ error: "Method not allowed. Use POST." }, 405);
   }
 
-  // c) Read the message
+  // c) Password check (see hasValidKey above for the three ways it can arrive)
+  if (!hasValidKey(req)) {
+    return json({ error: "Unauthorized" }, 401);
+  }
+
+  // d) Read the message
   let body: any;
   try {
     body = await req.json();
@@ -340,10 +355,9 @@ Deno.serve(async (req: Request) => {
     return new Response(null, { status: 202, headers: corsHeaders });
   }
 
-  // d) Route by method
+  // e) Route by method
   try {
     switch (method) {
-      // The AI's first hello: we say who we are and that we have tools
       case "initialize":
         return rpcResult(id, {
           protocolVersion: params?.protocolVersion ?? "2025-03-26",
@@ -351,15 +365,12 @@ Deno.serve(async (req: Request) => {
           serverInfo: { name: "open-brain", version: "1.0.0" },
         });
 
-      // "Are you still there?"
       case "ping":
         return rpcResult(id, {});
 
-      // "What tools do you have?"
       case "tools/list":
         return rpcResult(id, { tools: TOOLS });
 
-      // "Please run this tool"
       case "tools/call": {
         const name = String(params?.name ?? "");
         const args = (params?.arguments ?? {}) as Record<string, unknown>;
