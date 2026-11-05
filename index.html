@@ -5,17 +5,18 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>My Open Brain</title>
 <link rel="manifest" href="manifest.json">
-<meta name="theme-color" content="#6366f1">
+<meta name="theme-color" content="#0b0b0b">
 <link rel="apple-touch-icon" href="icon-192.png">
 <style>
   :root {
-    --bg: #0f0f0f;
-    --card: #161616;
-    --accent: #6366f1;
-    --accent-dim: #4b4fd1;
-    --text: #e8e8e8;
-    --muted: #8a8a8a;
-    --border: #272727;
+    --bg: #0b0b0b;
+    --card: rgba(20,20,20,0.78);
+    --accent: #e6e6e6;
+    --accent-dim: #bfbfbf;
+    --accent-text: #111111;
+    --text: #ededed;
+    --muted: #9a9a9a;
+    --border: rgba(255,255,255,0.12);
     --danger: #ef4444;
     --success: #22c55e;
   }
@@ -27,7 +28,21 @@
     margin: 0;
     padding: 0;
     -webkit-tap-highlight-color: transparent;
+    min-height: 100vh;
   }
+  /* Paint-texture backdrop from the app icon, faded so text stays readable */
+  body::before {
+    content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+    background:
+      linear-gradient(180deg, rgba(11,11,11,0.55) 0%, rgba(11,11,11,0.85) 100%),
+      url("bg-texture.jpg") center / cover no-repeat;
+    opacity: 0.55;
+  }
+  .card, .yt-preview, .tab-btn, input[type="email"], input[type="password"], input[type="text"], textarea {
+    -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+  }
+  .brand { display:flex; align-items:center; gap:10px; }
+  .brand-icon { width:30px; height:30px; border-radius:8px; border:1px solid var(--border); }
   #app { max-width: 720px; margin: 0 auto; padding: 16px; padding-bottom: 60px; }
 
   /* Top bar */
@@ -45,24 +60,25 @@
   #login-screen p.sub { color: var(--muted); font-size: 14px; margin-top:0; margin-bottom:24px; }
   .auth-toggle { display:flex; gap:0; margin-bottom:20px; border:1px solid var(--border); border-radius:10px; overflow:hidden; }
   .auth-toggle button { flex:1; padding:10px; background:none; border:none; color: var(--muted); cursor:pointer; font-size:14px; }
-  .auth-toggle button.active { background: var(--accent); color:#fff; }
+  .auth-toggle button.active { background: var(--accent); color: var(--accent-text); }
   input[type="email"], input[type="password"], input[type="text"], textarea {
     width:100%; padding:12px 14px; background: var(--card); border:1px solid var(--border);
     color: var(--text); border-radius:10px; font-size:15px; margin-bottom:12px; font-family:inherit;
   }
   textarea { resize:vertical; min-height:100px; }
   input:focus, textarea:focus { outline:none; border-color: var(--accent); }
-  .btn { width:100%; padding:12px; background: var(--accent); color:#fff; border:none; border-radius:10px; font-size:15px; font-weight:600; cursor:pointer; }
+  .btn { width:100%; padding:12px; background: var(--accent); color: var(--accent-text); border:none; border-radius:10px; font-size:15px; font-weight:600; cursor:pointer; }
   .btn:hover { background: var(--accent-dim); }
   .btn:disabled { opacity:0.5; cursor:not-allowed; }
   .btn-secondary { background:none; border:1px solid var(--border); color: var(--text); }
+  .btn-secondary:hover { background: rgba(255,255,255,0.08); }
   .error-msg { color: var(--danger); font-size:13px; margin-bottom:12px; min-height:0; }
 
   /* Tabs */
   .tabs { display:flex; gap:6px; overflow-x:auto; margin-bottom:20px; padding-bottom:4px; }
   .tabs::-webkit-scrollbar { display:none; }
   .tab-btn { flex-shrink:0; padding:8px 14px; background: var(--card); border:1px solid var(--border); color: var(--muted); border-radius:20px; font-size:14px; cursor:pointer; white-space:nowrap; }
-  .tab-btn.active { background: var(--accent); color:#fff; border-color: var(--accent); }
+  .tab-btn.active { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight:600; }
 
   .tab-panel { display:none; }
   .tab-panel.active { display:block; }
@@ -76,9 +92,9 @@
   .mic-wrap { display:flex; justify-content:center; margin:24px 0; }
   .mic-btn {
     width:88px; height:88px; border-radius:50%; background: var(--accent); border:none;
-    color:#fff; font-size:32px; cursor:pointer; display:flex; align-items:center; justify-content:center;
+    color: var(--accent-text); font-size:32px; cursor:pointer; box-shadow: 0 0 0 6px rgba(255,255,255,0.06); display:flex; align-items:center; justify-content:center;
   }
-  .mic-btn.listening { animation: pulse 1.4s infinite; background: var(--danger); }
+  .mic-btn.listening { animation: pulse 1.4s infinite; background: var(--danger); color:#fff; }
   @keyframes pulse {
     0% { box-shadow: 0 0 0 0 rgba(239,68,68,0.5); }
     70% { box-shadow: 0 0 0 20px rgba(239,68,68,0); }
@@ -107,20 +123,20 @@
   details.manual summary { cursor:pointer; color: var(--muted); font-size:13px; margin-bottom:12px; }
 
   label.small { display:block; font-size:13px; color: var(--muted); margin-bottom:6px; }
-  .toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background: var(--success); color:#fff; padding:10px 20px; border-radius:10px; font-size:14px; display:none; z-index:100; }
+  .toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background: var(--accent); color: var(--accent-text); padding:10px 20px; border-radius:10px; font-size:14px; display:none; z-index:100; }
   .search-row { display:flex; gap:8px; margin-bottom:16px; }
   .search-row input { margin-bottom:0; }
   .search-row button { flex-shrink:0; padding:0 16px; border-radius:10px; border:1px solid var(--border); background:var(--card); color:var(--text); cursor:pointer; }
 
   /* Level 7: the passage inside a long capture that actually matched */
-  .matched-chunk { white-space:pre-wrap; font-size:15px; line-height:1.5; border-left:3px solid var(--accent); background: rgba(99,102,241,0.08); padding:10px 12px; border-radius:6px; margin-bottom:12px; }
+  .matched-chunk { white-space:pre-wrap; font-size:15px; line-height:1.5; border-left:3px solid var(--accent); background: rgba(255,255,255,0.05); padding:10px 12px; border-radius:6px; margin-bottom:12px; }
   .matched-label { font-size:12px; color: var(--muted); margin-bottom:6px; }
 </style>
 </head>
 <body>
 
 <div id="login-screen" style="display:none;">
-  <h1>My Open Brain</h1>
+  <h1 style="display:flex; align-items:center; gap:10px;"><img src="icon-192.png" alt="" class="brand-icon">My Open Brain</h1>
   <p class="sub">Sign in to see your thoughts. Nobody else can.</p>
   <div class="auth-toggle">
     <button id="mode-signin" class="active">Sign In</button>
@@ -135,7 +151,7 @@
 <div id="app-screen" style="display:none;">
   <div id="app">
     <div class="topbar">
-      <div class="brand">🧠 My Open Brain</div>
+      <div class="brand"><img src="icon-192.png" alt="" class="brand-icon">My Open Brain</div>
       <div style="display:flex; align-items:center; gap:12px;">
         <div class="status"><span class="dot" id="status-dot"></span><span id="status-text">Checking...</span></div>
         <button class="signout-btn" id="signout-btn">Sign out</button>
